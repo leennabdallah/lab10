@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CI/CD Lab — Youssef Al Hajj Youness — DEV</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; color: #0f172a; background: #f8fafc; }
+    body { margin: 0; padding: 24px; line-height: 1.5; }
+    header { margin-bottom: 24px; }
+    h1 { margin: 0 0 8px; font-size: 1.5rem; }
+    .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+    .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px; box-shadow: 0 1px 2px rgb(0 0 0 / 0.05); }
+    .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; background: #e0f2fe; color: #0369a1; font-size: 0.85rem; font-weight: 600; }
+    pre { background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 8px; overflow: auto; font-size: 0.85rem; }
+    label { display: block; font-weight: 600; margin-bottom: 6px; }
+    input, button { font: inherit; }
+    input { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid #cbd5e1; box-sizing: border-box; }
+    button { margin-top: 8px; padding: 8px 12px; border-radius: 8px; border: 0; background: #2563eb; color: #fff; cursor: pointer; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .err { color: #b91c1c; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1 id="pageTitle">CI/CD Lab — Youssef Al Hajj Youness</h1>
+    <div><span class="pill" id="envPill">Loading…</span></div>
+    <p id="subtitle">Kubernetes + GitHub Actions demo</p>
+  </header>
+  <div class="grid">
+    <section class="card">
+      <h2>Health</h2>
+      <p class="err" id="healthErr" hidden></p>
+      <pre id="healthOut">…</pre>
+    </section>
+    <section class="card">
+      <h2>Visits</h2>
+      <p class="err" id="visitsErr" hidden></p>
+      <pre id="visitsOut">…</pre>
+    </section>
+    <section class="card">
+      <h2>Messages</h2>
+      <label for="msg">New message</label>
+      <input id="msg" type="text" autocomplete="off" placeholder="Write something…" />
+      <button id="send" type="button">Send</button>
+      <p class="err" id="msgErr" hidden></p>
+      <pre id="msgList">…</pre>
+    </section>
+  </div>
+  <script>
+    (function () {
+      const api = (path) => "/api" + path;
+
+      function setErr(id, text) {
+        const el = document.getElementById(id);
+        if (!text) {
+          el.hidden = true;
+          el.textContent = "";
+          return;
+        }
+        el.hidden = false;
+        el.textContent = text;
+      }
+
+      function updateTitle(env) {
+        const e = (env || "dev").toUpperCase();
+        const name = "Youssef Al Hajj Youness";
+        document.title = "CI/CD Lab — " + name + " — " + e;
+        document.getElementById("pageTitle").textContent =
+          "CI/CD Lab — " + name + " — " + e;
+        document.getElementById("envPill").textContent = e;
+      }
+
+      async function loadHealth() {
+        setErr("healthErr", "");
+        try {
+          const res = await fetch(api("/health"));
+          const data = await res.json();
+          document.getElementById("healthOut").textContent = JSON.stringify(data, null, 2);
+          if (data && data.environment) {
+            updateTitle(data.environment);
+          }
+        } catch (e) {
+          setErr("healthErr", String(e));
+        }
+      }
+
+      async function loadVisits() {
+        setErr("visitsErr", "");
+        try {
+          const res = await fetch(api("/visits"));
+          const data = await res.json();
+          document.getElementById("visitsOut").textContent = JSON.stringify(data, null, 2);
+          if (data && data.environment) {
+            updateTitle(data.environment);
+          }
+        } catch (e) {
+          setErr("visitsErr", String(e));
+        }
+      }
+
+      async function loadMessages() {
+        setErr("msgErr", "");
+        try {
+          const res = await fetch(api("/messages"));
+          const data = await res.json();
+          document.getElementById("msgList").textContent = JSON.stringify(data, null, 2);
+          if (data && data.environment) {
+            updateTitle(data.environment);
+          }
+        } catch (e) {
+          setErr("msgErr", String(e));
+        }
+      }
+
+      async function sendMessage() {
+        const input = document.getElementById("msg");
+        const btn = document.getElementById("send");
+        const text = input.value.trim();
+        if (!text) return;
+        setErr("msgErr", "");
+        btn.disabled = true;
+        try {
+          const res = await fetch(api("/messages"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: text }),
+          });
+          if (!res.ok) {
+            const body = await res.text();
+            throw new Error("HTTP " + res.status + " " + body);
+          }
+          input.value = "";
+          await loadMessages();
+        } catch (e) {
+          setErr("msgErr", String(e));
+        } finally {
+          btn.disabled = false;
+        }
+      }
+
+      document.getElementById("send").addEventListener("click", sendMessage);
+      document.getElementById("msg").addEventListener("keydown", function (ev) {
+        if (ev.key === "Enter") {
+          ev.preventDefault();
+          sendMessage();
+        }
+      });
+
+      Promise.all([loadHealth(), loadVisits(), loadMessages()]).catch(function () {
+        /* individual cards show errors */
+      });
+    })();
+  </script>
+</body>
+</html>

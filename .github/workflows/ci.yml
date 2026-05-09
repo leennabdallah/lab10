@@ -1,0 +1,204 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    name: Lint and Test
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Install dependencies
+        working-directory: ./app
+        run: npm ci
+
+      - name: Run unit tests
+        working-directory: ./app
+        run: npm test
+
+      - name: Run integration tests
+        working-directory: ./app
+        env:
+          REDIS_HOST: localhost
+        run: npm run test:integration
+
+  build:
+    name: Build, Scan, and Push to ECR
+    needs:
+      - test
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.meta.outputs.sha }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag
+        id: meta
+        run: |
+          sha="${GITHUB_SHA::8}"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Build backend image
+        run: |
+          docker build \
+            -t ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/k8s-backend:${{ steps.meta.outputs.sha }} \
+            ./app
+
+      - name: Build frontend image
+        run: |
+          docker build \
+            -t ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/k8s-frontend:${{ steps.meta.outputs.sha }} \
+            ./app/frontend
+
+      - name: Scan backend image with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/k8s-backend:${{ steps.meta.outputs.sha }}
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Scan frontend image with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/k8s-frontend:${{ steps.meta.outputs.sha }}
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Push backend image
+        run: |
+          docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/k8s-backend:${{ steps.meta.outputs.sha }}
+
+      - name: Push frontend image
+        run: |
+          docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/k8s-frontend:${{ steps.meta.outputs.sha }}
+
+  deploy-dev:
+    name: Deploy to Dev
+    needs:
+      - build
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.29.14
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name ${{ secrets.EKS_CLUSTER_NAME }} \
+            --region ${{ secrets.AWS_REGION }}
+
+      - name: Update deployments to new image
+        env:
+          TAG: ${{ needs.build.outputs.image-tag }}
+          REG_PREFIX: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+        run: |
+          kubectl -n dev set image deployment/backend "backend=${REG_PREFIX}/k8s-backend:${TAG}"
+          kubectl -n dev set image deployment/frontend "frontend=${REG_PREFIX}/k8s-frontend:${TAG}"
+          kubectl -n dev set env deployment/backend "APP_ENV=dev"
+
+      - name: Wait for rollout
+        run: |
+          kubectl -n dev rollout status deployment/backend --timeout=180s
+          kubectl -n dev rollout status deployment/frontend --timeout=180s
+
+      - name: Verify pods
+        run: kubectl get pods -n dev -o wide
+
+  deploy-prod:
+    name: Deploy to Production
+    needs:
+      - build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.29.14
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name ${{ secrets.EKS_CLUSTER_NAME }} \
+            --region ${{ secrets.AWS_REGION }}
+
+      - name: Update deployments to new image
+        env:
+          TAG: ${{ needs.build.outputs.image-tag }}
+          REG_PREFIX: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+        run: |
+          kubectl -n prod set image deployment/backend "backend=${REG_PREFIX}/k8s-backend:${TAG}"
+          kubectl -n prod set image deployment/frontend "frontend=${REG_PREFIX}/k8s-frontend:${TAG}"
+          kubectl -n prod set env deployment/backend "APP_ENV=prod"
+
+      - name: Wait for rollout
+        run: |
+          kubectl -n prod rollout status deployment/backend --timeout=180s
+          kubectl -n prod rollout status deployment/frontend --timeout=180s
+
+      - name: Verify pods
+        run: kubectl get pods -n prod -o wide
